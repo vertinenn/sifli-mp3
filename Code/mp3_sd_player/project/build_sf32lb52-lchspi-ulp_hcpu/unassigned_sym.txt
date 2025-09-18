@@ -1,0 +1,5 @@
+CFG_AV (defined at E:\OpenSiFli\sifli-sdk//middleware\bluetooth/Kconfig:236) was assigned the value 'y' but got the value 'n'. Check these unsatisfied dependencies: BT_PROFILE_CUSTOMIZE (=n), BSP_BLE_SIBLES (=n). 
+CFG_AV_SNK (defined at E:\OpenSiFli\sifli-sdk//middleware\bluetooth/Kconfig:244) was assigned the value 'y' but got the value 'n'. Check these unsatisfied dependencies: BT_PROFILE_CUSTOMIZE (=n), CFG_AV (=n), BSP_BLE_SIBLES (=n). 
+CFG_HID (defined at E:\OpenSiFli\sifli-sdk//middleware\bluetooth/Kconfig:258) was assigned the value 'y' but got the value 'n'. Check these unsatisfied dependencies: BT_PROFILE_CUSTOMIZE (=n), BSP_BLE_SIBLES (=n). 
+BT_AUTO_CONNECT_LAST_DEVICE (defined at E:\OpenSiFli\sifli-sdk//middleware\bluetooth/Kconfig:278) was assigned the value 'y' but got the value 'n'. Check these unsatisfied dependencies: BSP_BT_CONNECTION_MANAGER (=n), BSP_BLE_SIBLES (=n). 
+BTS2_APP_MENU (defined at E:\OpenSiFli\sifli-sdk//middleware\bluetooth/Kconfig:288) was assigned the value 'y' but got the value 'n'. Check these unsatisfied dependencies: BT_FINSH (=n), BSP_BLE_SIBLES (=n). 

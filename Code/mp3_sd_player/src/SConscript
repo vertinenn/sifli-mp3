@@ -1,0 +1,21 @@
+from building import *
+import rtconfig
+import os
+
+src = []
+inc = []
+cwd = GetCurrentDir() # get current dir path
+
+src+=Glob('*.c')
+inc+= [cwd]
+
+# 添加 fonts 模块（编译字体资源）
+src.extend(SConscript(os.path.join(cwd, 'fonts/SConscript'), variant_dir="fonts", duplicate=0))
+
+# 添加 images 模块（编译图片资源）
+src.extend(SConscript(os.path.join(cwd, 'images/SConscript'), variant_dir="images", duplicate=0))
+
+src.extend(SConscript(os.path.join(cwd, 'bt_pan/SConscript'), variant_dir="bt_pan", duplicate=0))
+
+group = DefineGroup('MP3_SD_PLAYER', src, depend = ['PKG_USING_LITTLEVGL2RTT', 'CFG_PAN'], CPPPATH = inc)
+Return('group')
