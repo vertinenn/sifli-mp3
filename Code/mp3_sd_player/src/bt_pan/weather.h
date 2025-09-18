@@ -90,6 +90,7 @@ char *weather_get_data(void);
 int weather_parse_data(char *json_data);
 int weather_check_internet_access(void);
 void weather_cmd(int argc, char **argv);
+user_seniverse_config_t* weather_get_parsed_data(void);
 
 /* 内部函数声明 */
 static void svr_found_callback(const char *name, const ip_addr_t *ipaddr, void *callback_arg);

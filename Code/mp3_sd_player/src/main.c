@@ -68,6 +68,8 @@ static void apply_time_setting(void);
 static void create_screen_weather_page(void);
 static void main_weather_btn_event_handler(lv_event_t *event);
 static void weather_back_btn_event_handler(lv_event_t *event);
+static void update_weather_ui(void);
+void weather_ui_update_notify(void);
 
 
 // 配置文件系统路径宏
@@ -456,6 +458,9 @@ static void main_weather_btn_event_handler(lv_event_t *event)
     // 隐藏主界面，显示天气界面
     lv_obj_add_flag(main_page.self, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(weather_page.self, LV_OBJ_FLAG_HIDDEN);
+    
+    // 更新天气UI显示
+    update_weather_ui();
 }
 
 // 主界面时间按钮 事件处理函数
@@ -2234,6 +2239,121 @@ static void create_screen_weather_page(void)
     lv_obj_add_event_cb(weather_page.back_btn, weather_back_btn_event_handler, LV_EVENT_CLICKED, NULL);
     
     LOG_I("Weather page created successfully\n");
+}
+
+// 更新天气UI显示
+static void update_weather_ui(void)
+{
+    user_seniverse_config_t *weather_data = weather_get_parsed_data();
+    
+    if (weather_data == NULL)
+    {
+        LOG_W("No weather data available\n");
+        return;
+    }
+    
+    // 更新region标签 - 显示城市名称
+    if (weather_data->name && weather_page.region_label)
+    {
+        // 安全地去掉引号
+        const char *name = weather_data->name;
+        if (name[0] == '"' && name[strlen(name)-1] == '"')
+        {
+            // 创建临时字符串，去掉引号
+            char temp_name[64];
+            int len = strlen(name) - 2; // 去掉两个引号
+            if (len > 0 && len < sizeof(temp_name) - 1)
+            {
+                strncpy(temp_name, name + 1, len);
+                temp_name[len] = '\0';
+                lv_label_set_text(weather_page.region_label, temp_name);
+            }
+            else
+            {
+                lv_label_set_text(weather_page.region_label, name);
+            }
+        }
+        else
+        {
+            lv_label_set_text(weather_page.region_label, name);
+        }
+    }
+    
+    // 更新weather标签 - 显示天气状况
+    if (weather_data->now_config.txt && weather_page.weather_label)
+    {
+        // 安全地去掉引号
+        const char *weather = weather_data->now_config.txt;
+        if (weather[0] == '"' && weather[strlen(weather)-1] == '"')
+        {
+            // 创建临时字符串，去掉引号
+            char temp_weather[64];
+            int len = strlen(weather) - 2; // 去掉两个引号
+            if (len > 0 && len < sizeof(temp_weather) - 1)
+            {
+                strncpy(temp_weather, weather + 1, len);
+                temp_weather[len] = '\0';
+                lv_label_set_text(weather_page.weather_label, temp_weather);
+            }
+            else
+            {
+                lv_label_set_text(weather_page.weather_label, weather);
+            }
+        }
+        else
+        {
+            lv_label_set_text(weather_page.weather_label, weather);
+        }
+    }
+    
+    // 更新temp标签 - 显示温度
+    if (weather_data->now_config.temperature && weather_page.temp_label)
+    {
+        // 安全地去掉引号并添加温度单位
+        const char *temp = weather_data->now_config.temperature;
+        char temp_str[32];
+        
+        if (temp[0] == '"' && temp[strlen(temp)-1] == '"')
+        {
+            // 创建临时字符串，去掉引号
+            char clean_temp[16];
+            int len = strlen(temp) - 2; // 去掉两个引号
+            if (len > 0 && len < sizeof(clean_temp) - 1)
+            {
+                strncpy(clean_temp, temp + 1, len);
+                clean_temp[len] = '\0';
+                rt_snprintf(temp_str, sizeof(temp_str), "%s°C", clean_temp);
+            }
+            else
+            {
+                rt_snprintf(temp_str, sizeof(temp_str), "%s°C", temp);
+            }
+        }
+        else
+        {
+            rt_snprintf(temp_str, sizeof(temp_str), "%s°C", temp);
+        }
+        
+        lv_label_set_text(weather_page.temp_label, temp_str);
+    }
+    
+    LOG_I("Weather UI updated successfully\n");
+}
+
+// 天气UI更新通知函数
+void weather_ui_update_notify(void)
+{
+    // 检查天气页面是否当前可见
+    if (!lv_obj_has_flag(weather_page.self, LV_OBJ_FLAG_HIDDEN))
+    {
+        // 如果天气页面可见，立即更新UI
+        update_weather_ui();
+        rt_kprintf("Weather UI updated automatically\n");
+    }
+    else
+    {
+        rt_kprintf("Weather page not visible, UI will be updated when opened\n");
+    }
 }
 
 // 更新设置页面显示

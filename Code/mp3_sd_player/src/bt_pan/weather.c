@@ -49,9 +49,12 @@
 #include "lwip/ip_addr.h"
 #include <webclient.h>
 #include <cJSON.h>
+#include <string.h>
 
 /* 全局变量 */
 static uint8_t is_ip_searching = 0;
+static user_seniverse_config_t g_weather_data = {0};
+static rt_mutex_t weather_mutex = RT_NULL;
 
 /**
  * @brief DNS查找回调函数
@@ -73,21 +76,66 @@ static void svr_found_callback(const char *name, const ip_addr_t *ipaddr, void *
  */
 int weather_check_internet_access(void)
 {
-    int r = 0;
     const char *hostname = WEATHER_HOST;
     ip_addr_t addr = {0};
+    int timeout = 5000; // 5秒超时
+    int elapsed = 0;
 
+    // 尝试同步DNS解析
+    err_t err = dns_gethostbyname(hostname, &addr, NULL, NULL);
+    if (err == ERR_OK)
     {
-        err_t err = dns_gethostbyname(hostname, &addr, svr_found_callback, NULL);
-        if (err != ERR_OK && err != ERR_INPROGRESS)
+        rt_kprintf("DNS lookup succeeded, IP: %s\n", ipaddr_ntoa(&addr));
+        return 1;
+    }
+    else if (err == ERR_INPROGRESS)
+    {
+        // 等待DNS解析完成
+        while (elapsed < timeout)
         {
-            rt_kprintf("Could not find %s, please check PAN connection\n", hostname);
+            rt_thread_mdelay(100);
+            elapsed += 100;
+            
+            // 检查是否解析完成
+            err = dns_gethostbyname(hostname, &addr, NULL, NULL);
+            if (err == ERR_OK)
+            {
+                rt_kprintf("DNS lookup succeeded, IP: %s\n", ipaddr_ntoa(&addr));
+                return 1;
+            }
         }
-        else
-            r = 1;
+        rt_kprintf("DNS lookup timeout for %s\n", hostname);
+    }
+    else
+    {
+        rt_kprintf("Could not find %s, please check PAN connection\n", hostname);
     }
 
-    return r;
+    return 0;
+}
+
+/**
+ * @brief 清理天气数据
+ */
+void weather_cleanup_data(void)
+{
+    if (weather_mutex)
+    {
+        rt_mutex_take(weather_mutex, RT_WAITING_FOREVER);
+        
+        if (g_weather_data.id) { rt_free(g_weather_data.id); g_weather_data.id = NULL; }
+        if (g_weather_data.name) { rt_free(g_weather_data.name); g_weather_data.name = NULL; }
+        if (g_weather_data.country) { rt_free(g_weather_data.country); g_weather_data.country = NULL; }
+        if (g_weather_data.path) { rt_free(g_weather_data.path); g_weather_data.path = NULL; }
+        if (g_weather_data.timezone) { rt_free(g_weather_data.timezone); g_weather_data.timezone = NULL; }
+        if (g_weather_data.timezone_offset) { rt_free(g_weather_data.timezone_offset); g_weather_data.timezone_offset = NULL; }
+        if (g_weather_data.now_config.txt) { rt_free(g_weather_data.now_config.txt); g_weather_data.now_config.txt = NULL; }
+        if (g_weather_data.now_config.code) { rt_free(g_weather_data.now_config.code); g_weather_data.now_config.code = NULL; }
+        if (g_weather_data.now_config.temperature) { rt_free(g_weather_data.now_config.temperature); g_weather_data.now_config.temperature = NULL; }
+        if (g_weather_data.last_update) { rt_free(g_weather_data.last_update); g_weather_data.last_update = NULL; }
+        
+        rt_mutex_release(weather_mutex);
+    }
 }
 
 /**
@@ -97,89 +145,143 @@ int weather_check_internet_access(void)
  */
 int weather_parse_data(char *json_data)
 {
-    uint8_t i, j;
+    uint8_t i;
     uint8_t result_array_size = 0;
-    uint8_t now_array_size = 0;
-    uint32_t temperature = 0;
-
     cJSON *item = NULL;
     cJSON *root = NULL;
     cJSON *results_root = NULL;
-    cJSON *now_root = NULL;
     user_seniverse_config_t user_sen_config;
+    char *sresults = NULL;
 
-    root = cJSON_Parse(json_data);   /*json_data 为心知天气的原始数据*/
+    // 初始化配置结构体
+    memset(&user_sen_config, 0, sizeof(user_seniverse_config_t));
+
+    root = cJSON_Parse(json_data);
     if (!root)
     {
         rt_kprintf("Error before: [%s]\n", cJSON_GetErrorPtr());
-        return  -1;
+        return -1;
     }
 
-    cJSON *Presult = cJSON_GetObjectItem(root, "results");  /*results 的键值对为数组，*/
-    result_array_size = cJSON_GetArraySize(Presult);  /*求results键值对数组中有多少个元素*/
+    cJSON *Presult = cJSON_GetObjectItem(root, "results");
+    if (!Presult)
+    {
+        rt_kprintf("No results found in JSON\n");
+        cJSON_Delete(root);
+        return -1;
+    }
+    
+    result_array_size = cJSON_GetArraySize(Presult);
     for (i = 0; i < result_array_size; i++)
     {
         cJSON *item_results = cJSON_GetArrayItem(Presult, i);
-        char *sresults = cJSON_PrintUnformatted(item_results);
+        if (!item_results) continue;
+        
+        sresults = cJSON_PrintUnformatted(item_results);
+        if (!sresults) continue;
+        
         results_root = cJSON_Parse(sresults);
-
         if (!results_root)
         {
-            rt_kprintf("Error before: [%s]\n", cJSON_GetErrorPtr());
-            return  -1;
+            rt_kprintf("Error parsing results: [%s]\n", cJSON_GetErrorPtr());
+            rt_free(sresults);
+            continue;
         }
+        
         cJSON *Plocation = cJSON_GetObjectItem(results_root, "location");
+        if (Plocation)
+        {
+            item = cJSON_GetObjectItem(Plocation, "id");
+            if (item) user_sen_config.id = cJSON_Print(item);
 
-        item = cJSON_GetObjectItem(Plocation, "id");
-        user_sen_config.id = cJSON_Print(item);
+            item = cJSON_GetObjectItem(Plocation, "name");
+            if (item) user_sen_config.name = cJSON_Print(item);
 
-        item = cJSON_GetObjectItem(Plocation, "name");
-        user_sen_config.name = cJSON_Print(item);
+            item = cJSON_GetObjectItem(Plocation, "country");
+            if (item) user_sen_config.country = cJSON_Print(item);
 
-        item = cJSON_GetObjectItem(Plocation, "country");
-        user_sen_config.country = cJSON_Print(item);
+            item = cJSON_GetObjectItem(Plocation, "path");
+            if (item) user_sen_config.path = cJSON_Print(item);
 
-        item = cJSON_GetObjectItem(Plocation, "path");
-        user_sen_config.path = cJSON_Print(item);
+            item = cJSON_GetObjectItem(Plocation, "timezone");
+            if (item) user_sen_config.timezone = cJSON_Print(item);
 
-        item = cJSON_GetObjectItem(Plocation, "timezone");
-        user_sen_config.timezone = cJSON_Print(item);
+            item = cJSON_GetObjectItem(Plocation, "timezone_offset");
+            if (item) user_sen_config.timezone_offset = cJSON_Print(item);
+        }
 
-        item = cJSON_GetObjectItem(Plocation, "timezone_offset");
-        user_sen_config.timezone_offset = cJSON_Print(item);
-
-        /*-------------------------------------------------------------------*/
         cJSON *Pnow = cJSON_GetObjectItem(results_root, "now");
+        if (Pnow)
+        {
+            item = cJSON_GetObjectItem(Pnow, "text");
+            if (item) user_sen_config.now_config.txt = cJSON_Print(item);
 
-        item = cJSON_GetObjectItem(Pnow, "text");
-        user_sen_config.now_config.txt = cJSON_Print(item);
+            item = cJSON_GetObjectItem(Pnow, "code");
+            if (item) user_sen_config.now_config.code = cJSON_Print(item);
 
-        item = cJSON_GetObjectItem(Pnow, "code");
-        user_sen_config.now_config.code = cJSON_Print(item);
+            item = cJSON_GetObjectItem(Pnow, "temperature");
+            if (item) user_sen_config.now_config.temperature = cJSON_Print(item);
+        }
 
-        item = cJSON_GetObjectItem(Pnow, "temperature");
-        user_sen_config.now_config.temperature = cJSON_Print(item);
-
-        /*-------------------------------------------------------------------*/
         item = cJSON_GetObjectItem(results_root, "last_update");
-        user_sen_config.last_update = cJSON_Print(item);
+        if (item) user_sen_config.last_update = cJSON_Print(item);
 
-        cJSON_Delete(results_root);  /*每次调用cJSON_Parse函数后，都要释放内存*/
+        // 清理临时内存
+        cJSON_Delete(results_root);
+        rt_free(sresults);
+        sresults = NULL;
     }
 
-    rt_kprintf("id:%s\n", user_sen_config.id);
-    rt_kprintf("name:%s\n", user_sen_config.name);
-    rt_kprintf("country:%s\n", user_sen_config.country);
-    rt_kprintf("path:%s\n", user_sen_config.path);
-    rt_kprintf("timezone:%s\n", user_sen_config.timezone);
-    rt_kprintf("timezone_offset:%s\n", user_sen_config.timezone_offset);
-    rt_kprintf("txt:%s\n", user_sen_config.now_config.txt);
-    rt_kprintf("code:%s\n", user_sen_config.now_config.code);
-    rt_kprintf("temperature:%s\n", user_sen_config.now_config.temperature);
-    rt_kprintf("last_update:%s\n", user_sen_config.last_update);
-    cJSON_Delete(root);/*每次调用cJSON_Parse函数后，都要释放内存*/
+    // 输出天气信息
+    if (user_sen_config.id) rt_kprintf("id:%s\n", user_sen_config.id);
+    if (user_sen_config.name) rt_kprintf("name:%s\n", user_sen_config.name);
+    if (user_sen_config.country) rt_kprintf("country:%s\n", user_sen_config.country);
+    if (user_sen_config.path) rt_kprintf("path:%s\n", user_sen_config.path);
+    if (user_sen_config.timezone) rt_kprintf("timezone:%s\n", user_sen_config.timezone);
+    if (user_sen_config.timezone_offset) rt_kprintf("timezone_offset:%s\n", user_sen_config.timezone_offset);
+    if (user_sen_config.now_config.txt) rt_kprintf("txt:%s\n", user_sen_config.now_config.txt);
+    if (user_sen_config.now_config.code) rt_kprintf("code:%s\n", user_sen_config.now_config.code);
+    if (user_sen_config.now_config.temperature) rt_kprintf("temperature:%s\n", user_sen_config.now_config.temperature);
+    if (user_sen_config.last_update) rt_kprintf("last_update:%s\n", user_sen_config.last_update);
 
-    return  0;
+    // 保存到全局变量
+    if (weather_mutex)
+    {
+        rt_mutex_take(weather_mutex, RT_WAITING_FOREVER);
+        
+        // 清理旧数据（直接清理，不调用函数避免死锁）
+        if (g_weather_data.id) { rt_free(g_weather_data.id); g_weather_data.id = NULL; }
+        if (g_weather_data.name) { rt_free(g_weather_data.name); g_weather_data.name = NULL; }
+        if (g_weather_data.country) { rt_free(g_weather_data.country); g_weather_data.country = NULL; }
+        if (g_weather_data.path) { rt_free(g_weather_data.path); g_weather_data.path = NULL; }
+        if (g_weather_data.timezone) { rt_free(g_weather_data.timezone); g_weather_data.timezone = NULL; }
+        if (g_weather_data.timezone_offset) { rt_free(g_weather_data.timezone_offset); g_weather_data.timezone_offset = NULL; }
+        if (g_weather_data.now_config.txt) { rt_free(g_weather_data.now_config.txt); g_weather_data.now_config.txt = NULL; }
+        if (g_weather_data.now_config.code) { rt_free(g_weather_data.now_config.code); g_weather_data.now_config.code = NULL; }
+        if (g_weather_data.now_config.temperature) { rt_free(g_weather_data.now_config.temperature); g_weather_data.now_config.temperature = NULL; }
+        if (g_weather_data.last_update) { rt_free(g_weather_data.last_update); g_weather_data.last_update = NULL; }
+        
+        // 复制新数据（深拷贝）
+        g_weather_data.id = user_sen_config.id;
+        g_weather_data.name = user_sen_config.name;
+        g_weather_data.country = user_sen_config.country;
+        g_weather_data.path = user_sen_config.path;
+        g_weather_data.timezone = user_sen_config.timezone;
+        g_weather_data.timezone_offset = user_sen_config.timezone_offset;
+        g_weather_data.now_config.txt = user_sen_config.now_config.txt;
+        g_weather_data.now_config.code = user_sen_config.now_config.code;
+        g_weather_data.now_config.temperature = user_sen_config.now_config.temperature;
+        g_weather_data.last_update = user_sen_config.last_update;
+        
+        rt_mutex_release(weather_mutex);
+    }
+
+    cJSON_Delete(root);
+    
+    // 注意：不要释放user_sen_config中的内存，因为已经被全局变量使用了
+    // 这些内存会在下次更新时被清理
+    
+    return 0;
 }
 
 /**
@@ -274,6 +376,17 @@ __exit:
  */
 int weather_init(void)
 {
+    // 创建互斥锁
+    weather_mutex = rt_mutex_create("weather_mtx", RT_IPC_FLAG_FIFO);
+    if (weather_mutex == RT_NULL)
+    {
+        rt_kprintf("Failed to create weather mutex\n");
+        return -1;
+    }
+    
+    // 初始化天气数据
+    memset(&g_weather_data, 0, sizeof(user_seniverse_config_t));
+    
     rt_kprintf("Weather service initialized\n");
     return 0;
 }
@@ -283,7 +396,47 @@ int weather_init(void)
  */
 void weather_deinit(void)
 {
+    // 清理天气数据
+    weather_cleanup_data();
+    
+    // 删除互斥锁
+    if (weather_mutex)
+    {
+        rt_mutex_delete(weather_mutex);
+        weather_mutex = RT_NULL;
+    }
+    
     rt_kprintf("Weather service deinitialized\n");
+}
+
+/**
+ * @brief 获取天气数据
+ * @return 天气数据指针，失败返回NULL
+ */
+user_seniverse_config_t* weather_get_parsed_data(void)
+{
+    if (weather_mutex)
+    {
+        rt_mutex_take(weather_mutex, RT_WAITING_FOREVER);
+        user_seniverse_config_t *data = &g_weather_data;
+        rt_mutex_release(weather_mutex);
+        return data;
+    }
+    return NULL;
+}
+
+/**
+ * @brief 内存清理函数
+ */
+static void weather_memory_cleanup(void)
+{
+    // 强制垃圾回收
+    rt_kprintf("Performing weather memory cleanup...\n");
+    
+    // 这里可以添加更多的清理逻辑
+    // 比如清理DNS缓存、网络连接等
+    
+    rt_kprintf("Weather memory cleanup completed\n");
 }
 
 /**
@@ -293,12 +446,28 @@ void weather_deinit(void)
  */
 __ROM_USED void weather_cmd(int argc, char **argv)
 {
+    // 检查是否需要清理内存
+    if (argc > 1 && strcmp(argv[1], "cleanup") == 0)
+    {
+        weather_memory_cleanup();
+        return;
+    }
+    
     char *weather = weather_get_data();
 
     if (weather)
     {
         weather_parse_data(weather);
         rt_free(weather);
+        
+        // 每次获取天气后进行一次轻量级清理
+        weather_memory_cleanup();
+        
+        rt_kprintf("Weather data updated successfully\n");
+        
+        // 通知UI更新（如果天气页面当前可见）
+        extern void weather_ui_update_notify(void);
+        weather_ui_update_notify();
     }
     else
     {

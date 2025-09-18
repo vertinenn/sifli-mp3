@@ -212,48 +212,54 @@ static void pan_cmd(int argc, char **argv)
  */
 static void bt_pan_thread_entry(void *parameter)
 {
-    int retry_count = 0;
-    const int max_retries = 3;
+    uint32_t value;
+    rt_uint32_t last_cleanup_time = 0;
+    const rt_uint32_t cleanup_interval = 60000; // 60秒清理一次
+    BOOL bt_ready = FALSE;
     
     while (1)
     {
-        uint32_t value;
-        
-        // 增加超时时间到30秒，并添加重试机制
-        if (RT_EOK == rt_mb_recv(g_bt_app_mb, (rt_uint32_t *)&value, 30000) && value == BT_APP_READY)
+        // 定期清理内存，防止溢出
+        rt_uint32_t current_time = rt_tick_get_millisecond();
+        if (current_time - last_cleanup_time > cleanup_interval)
         {
-            LOG_I("BT/BLE stack and profile ready");
-            retry_count = 0; // 重置重试计数
-        }
-        else
-        {
-            retry_count++;
-            LOG_W("BT/BLE stack and profile init failed, retry %d/%d", retry_count, max_retries);
+            LOG_I("Performing periodic cleanup...");
             
-            if (retry_count >= max_retries)
+            // 清理定时器
+            if (g_bt_app_env.pan_connect_timer)
             {
-                LOG_E("BT/BLE stack init failed after %d retries, restarting...", max_retries);
-                retry_count = 0;
-                
-                // 重新初始化蓝牙
-                bt_pan_app_deinit();
-                rt_thread_mdelay(2000); // 等待2秒
-                bt_pan_app_init();
-                continue;
+                rt_timer_stop(g_bt_app_env.pan_connect_timer);
             }
             
-            // 等待一段时间后重试
-            rt_thread_mdelay(5000);
-            continue;
+            // 重置连接状态
+            g_bt_app_env.bt_connected = FALSE;
+            memset(&g_bt_app_env.bd_addr, 0xFF, sizeof(g_bt_app_env.bd_addr));
+            
+            last_cleanup_time = current_time;
+            LOG_I("Cleanup completed");
         }
-
-        // Update Bluetooth name - 确保名称正确设置
-        LOG_I("Setting Bluetooth name: %s", local_name);
-        bt_interface_set_local_name(strlen(local_name), (void *)local_name);
-
-        // handle pan connect event
-        rt_mb_recv(g_bt_app_mb, (rt_uint32_t *)&value, RT_WAITING_FOREVER);
-        if (value == BT_APP_CONNECT_PAN)
+        
+        // 只在第一次等待蓝牙栈就绪
+        if (!bt_ready)
+        {
+            if (RT_EOK == rt_mb_recv(g_bt_app_mb, (rt_uint32_t *)&value, 10000) && value == BT_APP_READY)
+            {
+                LOG_I("BT/BLE stack and profile ready");
+                bt_ready = TRUE;
+                
+                // Update Bluetooth name - 确保名称正确设置
+                LOG_I("Setting Bluetooth name: %s", local_name);
+                bt_interface_set_local_name(strlen(local_name), (void *)local_name);
+            }
+            else
+            {
+                LOG_W("BT/BLE stack init timeout, continuing...");
+                continue;
+            }
+        }
+        
+        // 处理PAN连接事件
+        if (RT_EOK == rt_mb_recv(g_bt_app_mb, (rt_uint32_t *)&value, 10000) && value == BT_APP_CONNECT_PAN)
         {
             if (g_bt_app_env.bt_connected)
             {
@@ -308,23 +314,32 @@ int bt_pan_app_init(void)
  */
 void bt_pan_app_deinit(void)
 {
+    // 安全清理定时器
     if (g_bt_app_env.pan_connect_timer)
     {
+        rt_timer_stop(g_bt_app_env.pan_connect_timer);
         rt_timer_delete(g_bt_app_env.pan_connect_timer);
         g_bt_app_env.pan_connect_timer = RT_NULL;
     }
 
+    // 清理邮箱
     if (g_bt_app_mb)
     {
         rt_mb_delete(g_bt_app_mb);
         g_bt_app_mb = RT_NULL;
     }
 
+    // 清理线程
     if (bt_pan_thread)
     {
         rt_thread_delete(bt_pan_thread);
         bt_pan_thread = RT_NULL;
     }
+
+    // 重置环境变量
+    memset(&g_bt_app_env, 0, sizeof(bt_app_t));
+    g_bt_app_env.bt_connected = FALSE;
+    memset(&g_bt_app_env.bd_addr, 0xFF, sizeof(g_bt_app_env.bd_addr));
 
     LOG_I("BT PAN deinitialized");
 }
